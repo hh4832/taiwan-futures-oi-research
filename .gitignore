@@ -1,0 +1,11 @@
+.env
+*.pfx
+service_account.json
+__pycache__/
+.ipynb_checkpoints/
+data/
+cache/
+outputs/*.csv
+outputs/*.parquet
+outputs/*.png
+!outputs/.gitkeep
