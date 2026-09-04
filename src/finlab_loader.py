@@ -17,9 +17,11 @@ PRICE_DATASET_CANDIDATES = {
 
 # 我們研究的是「臺股期貨」，不是 ETF、小台、MSCI 或其他商品
 FUTURES_SYMBOL_MAP = {
-    "外資及陸資": "臺股期貨_外資及陸資",
-    "投信": "臺股期貨_投信",
-    "自營商": "臺股期貨_自營商",
+    # FinLab changed the Taiwan-index-futures labels on 2024-04-17.
+    # Both names are required to preserve the continuous history.
+    "外資及陸資": ("台指_外資", "臺股期貨_外資及陸資"),
+    "投信": ("台指_投信", "臺股期貨_投信"),
+    "自營商": ("台指_自營商", "臺股期貨_自營商"),
 }
 
 
@@ -108,13 +110,10 @@ def inspect_futures_schema(raw) -> None:
 
     print("Target symbols:")
 
-    for symbol in FUTURES_SYMBOL_MAP.values():
-
-        n = (df["symbol"] == symbol).sum()
-
-        print(
-            f"{symbol}: {n:,} rows"
-        )
+    for symbols in FUTURES_SYMBOL_MAP.values():
+        for symbol in symbols:
+            n = (df["symbol"] == symbol).sum()
+            print(f"{symbol}: {n:,} rows")
 
 
 def load_futures_raw():
@@ -136,7 +135,7 @@ def standardize_futures_oi(
             f"Unknown institution: {institution}"
         )
 
-    target_symbol = FUTURES_SYMBOL_MAP[institution]
+    target_symbols = FUTURES_SYMBOL_MAP[institution]
 
     df = pd.DataFrame(raw).copy()
 
@@ -156,7 +155,7 @@ def standardize_futures_oi(
 
     # Exact match，非常重要
     work = df.loc[
-        df["symbol"] == target_symbol,
+        df["symbol"].isin(target_symbols),
         [
             "date",
             "多方未平倉口數",
@@ -166,7 +165,7 @@ def standardize_futures_oi(
 
     if work.empty:
         raise ValueError(
-            f"No data found for {target_symbol}"
+            f"No data found for {target_symbols}"
         )
 
     work["date"] = pd.to_datetime(work["date"])
@@ -188,18 +187,26 @@ def standardize_futures_oi(
         .sort_index()
     )
 
-    # 同一天若資料重複，只保留最後一筆
-    work = work[
-        ~work.index.duplicated(keep="last")
-    ]
+    duplicate_dates = work.index[work.index.duplicated(keep=False)].unique()
+    if len(duplicate_dates):
+        raise ValueError(
+            "Legacy/current futures symbols overlap on dates: "
+            f"{[str(x.date()) for x in duplicate_dates[:10]]}"
+        )
 
     work["institution"] = institution
 
     print(
-        f"{target_symbol}: "
+        f"{' + '.join(target_symbols)}: "
         f"{len(work):,} observations, "
         f"{work.index.min().date()} "
         f"→ {work.index.max().date()}"
     )
+
+    if len(work) < 1_000:
+        raise ValueError(
+            f"Insufficient OI history for {institution}: {len(work):,} rows. "
+            "Expected legacy and current FinLab symbols to produce at least 1,000 rows."
+        )
 
     return work
