@@ -49,20 +49,23 @@ def build_oi_features(
     out["gross_oi"] = out["long_oi"] + out["short_oi"]
     out["oi_ratio"] = safe_divide(out["net_oi"], out["gross_oi"])
 
+    derived = {}
     for accumulation in accumulation_windows:
         denominator = out["gross_oi"].shift(accumulation)
         for side in ("net", "long", "short"):
             source = out[f"{side}_oi"]
             raw_name = f"delta_{side}_{accumulation}d"
             ratio_name = f"{side}_change_ratio_{accumulation}d"
-            out[raw_name] = source - source.shift(accumulation)
-            out[ratio_name] = safe_divide(out[raw_name], denominator)
+            delta = source - source.shift(accumulation)
+            ratio = safe_divide(delta, denominator)
+            derived[raw_name] = delta
+            derived[ratio_name] = ratio
             for rolling_window in rolling_windows:
                 min_periods = min_periods_by_window[rolling_window]
-                out[f"{ratio_name}_z{rolling_window}"] = rolling_zscore(
-                    out[ratio_name], rolling_window, min_periods
+                derived[f"{ratio_name}_z{rolling_window}"] = rolling_zscore(
+                    ratio, rolling_window, min_periods
                 )
-                out[f"{ratio_name}_pr{rolling_window}"] = rolling_percentile(
-                    out[ratio_name], rolling_window, min_periods
+                derived[f"{ratio_name}_pr{rolling_window}"] = rolling_percentile(
+                    ratio, rolling_window, min_periods
                 )
-    return out
+    return pd.concat([out, pd.DataFrame(derived, index=out.index)], axis=1)
