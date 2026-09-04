@@ -4,6 +4,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+INSTITUTION_SLUGS = {
+    "外資及陸資": "foreign",
+    "投信": "trust",
+    "自營商": "dealer",
+    "三大法人合計": "institutional",
+}
+
+
 def create_parameter_surface_figures(results: pd.DataFrame, figure_dir: str | Path) -> list[Path]:
     """Plot primary percentile surfaces without ranking or selecting a best cell."""
     output = Path(figure_dir)
@@ -31,15 +39,18 @@ def create_parameter_surface_figures(results: pd.DataFrame, figure_dir: str | Pa
             ax.set_yticks(range(len(surface.index)), labels=surface.index)
             ax.set_xlabel("OI change window (trading days)")
             ax.set_ylabel("Rolling standardization window")
+            institution_slug = INSTITUTION_SLUGS.get(
+                institution, str(institution)
+            )
             ax.set_title(
-                f"{institution} | {side} | {group} | O1-C1 | {metric}"
+                f"{institution_slug} | {side} | {group} | O1-C1 | {metric}"
             )
             fig.colorbar(image, ax=ax)
             fig.tight_layout()
-            institution_dir = output / institution
+            institution_dir = output / institution_slug
             institution_dir.mkdir(parents=True, exist_ok=True)
             path = institution_dir / (
-                f"{institution}_{side}_{group}_o1_c1_{metric}_surface.png"
+                f"{institution_slug}_{side}_{group}_o1_c1_{metric}_surface.png"
             )
             fig.savefig(path, dpi=160)
             plt.close(fig)
