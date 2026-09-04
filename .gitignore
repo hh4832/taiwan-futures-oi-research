@@ -5,7 +5,5 @@ __pycache__/
 .ipynb_checkpoints/
 data/
 cache/
-outputs/*.csv
-outputs/*.parquet
-outputs/*.png
+outputs/**
 !outputs/.gitkeep

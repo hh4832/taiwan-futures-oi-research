@@ -5,3 +5,5 @@ statsmodels>=0.14
 matplotlib>=3.8
 pyarrow>=16
 finlab>=2.0.18
+google-api-python-client>=2.140
+pytest>=8.2

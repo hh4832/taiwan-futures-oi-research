@@ -1,155 +1,68 @@
-
 import numpy as np
 import pandas as pd
 
 
-def safe_divide(
-    num: pd.Series,
-    den: pd.Series
-) -> pd.Series:
-
-    out = (
-        num.astype(float)
-        / den.astype(float)
-    )
-
-    return out.replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
+def safe_divide(num: pd.Series, den: pd.Series) -> pd.Series:
+    out = num.astype(float) / den.astype(float)
+    return out.replace([np.inf, -np.inf], np.nan)
 
 
-def rolling_zscore(
-    s: pd.Series,
-    window: int = 252,
-    min_periods: int = 60
-) -> pd.Series:
-
-    mean = s.rolling(
-        window,
-        min_periods=min_periods
-    ).mean()
-
-    std = s.rolling(
-        window,
-        min_periods=min_periods
-    ).std(ddof=1)
-
-    return safe_divide(
-        s - mean,
-        std
-    )
+def rolling_zscore(s: pd.Series, window: int, min_periods: int) -> pd.Series:
+    """Z-score current value against strictly prior observations."""
+    history = s.astype(float).shift(1)
+    mean = history.rolling(window, min_periods=min_periods).mean()
+    std = history.rolling(window, min_periods=min_periods).std(ddof=1)
+    return safe_divide(s.astype(float) - mean, std)
 
 
-def expanding_percentile(
-    s: pd.Series,
-    min_periods: int = 60
-) -> pd.Series:
-    """
-    Historical percentile without look-ahead.
-
-    At date t, ranking uses observations
-    available from the beginning through t only.
-    """
-
-    s = s.astype(float)
-
-    # Pandas native expanding rank
-    # avoids the extremely slow expanding.apply()
-    out = (
-        s.expanding(
-            min_periods=min_periods
-        )
-        .rank(pct=True)
-    )
-
-    return out
+def rolling_percentile(s: pd.Series, window: int, min_periods: int) -> pd.Series:
+    """Percentile of today's value within the strictly prior rolling history."""
+    values = s.astype(float).to_numpy()
+    result = np.full(len(values), np.nan, dtype=float)
+    for i, current in enumerate(values):
+        if np.isnan(current):
+            continue
+        history = values[max(0, i - window):i]
+        history = history[~np.isnan(history)]
+        if len(history) >= min_periods:
+            result[i] = np.mean(history <= current)
+    return pd.Series(result, index=s.index, name=s.name)
 
 
 def build_oi_features(
     df: pd.DataFrame,
-    window: int = 252,
-    min_periods: int = 60
+    accumulation_windows=(1, 3, 5, 10),
+    rolling_windows=(60, 120, 252),
+    min_periods_by_window=None,
 ) -> pd.DataFrame:
-
-    required = {
-        "long_oi",
-        "short_oi"
-    }
-
-    missing = required.difference(
-        df.columns
-    )
-
+    required = {"long_oi", "short_oi"}
+    missing = required.difference(df.columns)
     if missing:
-        raise ValueError(
-            f"Missing columns: {sorted(missing)}"
-        )
+        raise ValueError(f"Missing columns: {sorted(missing)}")
+    if min_periods_by_window is None:
+        min_periods_by_window = {60: 40, 120: 80, 252: 126}
 
-    out = (
-        df.copy()
-        .sort_index()
-    )
+    out = df.copy().sort_index()
+    if out.index.has_duplicates:
+        raise ValueError("OI index contains duplicate dates")
+    out["net_oi"] = out["long_oi"] - out["short_oi"]
+    out["gross_oi"] = out["long_oi"] + out["short_oi"]
+    out["oi_ratio"] = safe_divide(out["net_oi"], out["gross_oi"])
 
-    # Absolute positioning
-    out["net_oi"] = (
-        out["long_oi"]
-        - out["short_oi"]
-    )
-
-    out["gross_oi"] = (
-        out["long_oi"]
-        + out["short_oi"]
-    )
-
-    out["oi_ratio"] = safe_divide(
-        out["net_oi"],
-        out["gross_oi"]
-    )
-
-    # Daily changes
-    out["delta_long_oi"] = (
-        out["long_oi"].diff()
-    )
-
-    out["delta_short_oi"] = (
-        out["short_oi"].diff()
-    )
-
-    out["delta_net_oi"] = (
-        out["net_oi"].diff()
-    )
-
-    # Change in directional exposure
-    # normalized by previous day's gross OI
-    out["oi_change_ratio"] = safe_divide(
-        out["delta_net_oi"],
-        out["gross_oi"].shift(1)
-    )
-
-    feature_cols = [
-        "net_oi",
-        "oi_ratio",
-        "oi_change_ratio",
-        "delta_long_oi",
-        "delta_short_oi",
-    ]
-
-    for col in feature_cols:
-
-        out[f"{col}_z{window}"] = (
-            rolling_zscore(
-                out[col],
-                window,
-                min_periods
-            )
-        )
-
-        out[f"{col}_pr"] = (
-            expanding_percentile(
-                out[col],
-                min_periods
-            )
-        )
-
+    for accumulation in accumulation_windows:
+        denominator = out["gross_oi"].shift(accumulation)
+        for side in ("net", "long", "short"):
+            source = out[f"{side}_oi"]
+            raw_name = f"delta_{side}_{accumulation}d"
+            ratio_name = f"{side}_change_ratio_{accumulation}d"
+            out[raw_name] = source - source.shift(accumulation)
+            out[ratio_name] = safe_divide(out[raw_name], denominator)
+            for rolling_window in rolling_windows:
+                min_periods = min_periods_by_window[rolling_window]
+                out[f"{ratio_name}_z{rolling_window}"] = rolling_zscore(
+                    out[ratio_name], rolling_window, min_periods
+                )
+                out[f"{ratio_name}_pr{rolling_window}"] = rolling_percentile(
+                    out[ratio_name], rolling_window, min_periods
+                )
     return out
