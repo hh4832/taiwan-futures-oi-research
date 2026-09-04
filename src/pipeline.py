@@ -133,9 +133,41 @@ def analyze_finite_grid(
     return merged, results
 
 
-def _data_quality(oi: pd.DataFrame, price: pd.DataFrame) -> pd.DataFrame:
+def _build_analysis_oi(raw_futures, config: ResearchConfig) -> dict[str, pd.DataFrame]:
+    """Build individual institutions and the date-aligned three-institution total."""
+    individual = {
+        institution: standardize_futures_oi(raw_futures, institution)
+        for institution in config.institutions
+    }
+    aligned = pd.concat(
+        {
+            institution: frame[["long_oi", "short_oi"]]
+            for institution, frame in individual.items()
+        },
+        axis=1,
+        join="inner",
+    )
+    if aligned.empty:
+        raise ValueError("No common OI dates across the three institutions")
+
+    total = pd.DataFrame(index=aligned.index)
+    total["long_oi"] = aligned.xs("long_oi", axis=1, level=1).sum(axis=1)
+    total["short_oi"] = aligned.xs("short_oi", axis=1, level=1).sum(axis=1)
+    total["institution"] = "三大法人合計"
+    if total[["long_oi", "short_oi"]].isna().any().any():
+        raise ValueError("Institutional total contains missing OI after date alignment")
+
+    return {**individual, "三大法人合計": total}
+
+
+def _data_quality(
+    oi_by_institution: dict[str, pd.DataFrame],
+    price: pd.DataFrame,
+) -> pd.DataFrame:
     rows = []
-    for name, frame in (("oi", oi), ("price", price)):
+    datasets = [(f"oi_{institution}", frame) for institution, frame in oi_by_institution.items()]
+    datasets.append(("price", price))
+    for name, frame in datasets:
         rows.extend(
             {
                 "dataset": name,
@@ -152,13 +184,19 @@ def _data_quality(oi: pd.DataFrame, price: pd.DataFrame) -> pd.DataFrame:
                 {"dataset": name, "check": "last_date", "value": str(frame.index.max().date())},
             ]
         )
-    if {"long_oi", "short_oi"}.issubset(oi.columns):
-        gross = oi["long_oi"] + oi["short_oi"]
-        rows.append({"dataset": "oi", "check": "zero_gross_oi", "value": int(gross.eq(0).sum())})
+        if name.startswith("oi_") and {"long_oi", "short_oi"}.issubset(frame.columns):
+            gross = frame["long_oi"] + frame["short_oi"]
+            rows.append(
+                {"dataset": name, "check": "zero_gross_oi", "value": int(gross.eq(0).sum())}
+            )
     return pd.DataFrame(rows)
 
 
-def _annual_and_era(merged: pd.DataFrame, config: ResearchConfig):
+def _annual_and_era(
+    merged: pd.DataFrame,
+    institution: str,
+    config: ResearchConfig,
+):
     annual_rows, era_rows = [], []
     for side in config.predictor_sides:
         for accumulation in config.accumulation_windows:
@@ -184,6 +222,7 @@ def _annual_and_era(merged: pd.DataFrame, config: ResearchConfig):
                         for year, values in sample.groupby(sample.index.year):
                             annual_rows.append(
                                 {
+                                    "institution": institution,
                                     "side": side, "accumulation_window": accumulation,
                                     "rolling_window": rolling_window, "standardization": method,
                                     "group": group, "year": year, "n": len(values),
@@ -203,6 +242,7 @@ def _annual_and_era(merged: pd.DataFrame, config: ResearchConfig):
                         for era, values in sample.groupby(eras):
                             era_rows.append(
                                 {
+                                    "institution": institution,
                                     "side": side, "accumulation_window": accumulation,
                                     "rolling_window": rolling_window, "standardization": method,
                                     "group": group, "era": era, "n": len(values),
@@ -213,7 +253,11 @@ def _annual_and_era(merged: pd.DataFrame, config: ResearchConfig):
     return pd.DataFrame(annual_rows), pd.DataFrame(era_rows)
 
 
-def _event_and_nonoverlap(merged: pd.DataFrame, config: ResearchConfig):
+def _event_and_nonoverlap(
+    merged: pd.DataFrame,
+    institution: str,
+    config: ResearchConfig,
+):
     event_rows, nonoverlap_rows = [], []
     for side in config.predictor_sides:
         for accumulation in config.accumulation_windows:
@@ -233,6 +277,7 @@ def _event_and_nonoverlap(merged: pd.DataFrame, config: ResearchConfig):
                     ):
                         values = merged.loc[sample_mask, "o1_c1"].dropna()
                         row = {
+                            "institution": institution,
                             "side": side, "accumulation_window": accumulation,
                             "rolling_window": rolling_window, "group": group,
                             "n": len(values), "mean_return": values.mean(),
@@ -243,7 +288,12 @@ def _event_and_nonoverlap(merged: pd.DataFrame, config: ResearchConfig):
     return pd.DataFrame(event_rows), pd.DataFrame(nonoverlap_rows)
 
 
-def _outlier_robustness(merged: pd.DataFrame, results: pd.DataFrame) -> pd.DataFrame:
+def _outlier_robustness(
+    merged: pd.DataFrame,
+    results: pd.DataFrame,
+    institution: str,
+    config: ResearchConfig,
+) -> pd.DataFrame:
     primary = results.loc[
         results["outcome_role"].eq("primary")
         & results["bin_set"].eq("coarse")
@@ -257,8 +307,8 @@ def _outlier_robustness(merged: pd.DataFrame, results: pd.DataFrame) -> pd.DataF
     for row in primary.itertuples(index=False):
         score_col = f"{row.predictor}_pr{row.rolling_window}"
         groups = pd.cut(
-            merged[score_col], CONFIG.percentile_bins,
-            labels=CONFIG.percentile_labels, include_lowest=True,
+            merged[score_col], config.percentile_bins,
+            labels=config.percentile_labels, include_lowest=True,
         )
         group_mask = groups.eq(row.group)
         for scenario, valid in (
@@ -270,6 +320,7 @@ def _outlier_robustness(merged: pd.DataFrame, results: pd.DataFrame) -> pd.DataF
             nongroup = target.loc[~group_mask & groups.notna() & valid]
             rows.append(
                 {
+                    "institution": institution,
                     "side": row.side,
                     "accumulation_window": row.accumulation_window,
                     "rolling_window": row.rolling_window,
@@ -306,14 +357,41 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         inspect_futures_schema(raw_futures)
     price, price_keys = load_0050_price(config.target_symbol)
     returns = build_forward_returns(price, config.outcome_horizons)
-    oi = standardize_futures_oi(raw_futures, config.primary_institutions[0])
-    merged, results = analyze_finite_grid(oi, returns, config.primary_institutions[0], config)
+    oi_by_institution = _build_analysis_oi(raw_futures, config)
+    merged_parts = {}
+    result_parts = []
+    annual_parts, era_parts = [], []
+    event_parts, nonoverlap_parts, outlier_parts = [], [], []
+
+    for institution, oi in oi_by_institution.items():
+        print(f"Running finite grid: {institution}")
+        merged, institution_results = analyze_finite_grid(
+            oi, returns, institution, config
+        )
+        merged_parts[institution] = merged
+        result_parts.append(institution_results)
+
+        annual, eras = _annual_and_era(merged, institution, config)
+        events, nonoverlap = _event_and_nonoverlap(merged, institution, config)
+        outliers = _outlier_robustness(
+            merged, institution_results, institution, config
+        )
+        annual_parts.append(annual)
+        era_parts.append(eras)
+        event_parts.append(events)
+        nonoverlap_parts.append(nonoverlap)
+        outlier_parts.append(outliers)
+
+    results = pd.concat(result_parts, ignore_index=True)
+    merged = pd.concat(merged_parts, names=["institution", "date"])
+    annual = pd.concat(annual_parts, ignore_index=True)
+    eras = pd.concat(era_parts, ignore_index=True)
+    events = pd.concat(event_parts, ignore_index=True)
+    nonoverlap = pd.concat(nonoverlap_parts, ignore_index=True)
+    outliers = pd.concat(outlier_parts, ignore_index=True)
     archive, commit = _make_archive(output_root, config)
 
-    quality = _data_quality(oi, price)
-    annual, eras = _annual_and_era(merged, config)
-    events, nonoverlap = _event_and_nonoverlap(merged, config)
-    outliers = _outlier_robustness(merged, results)
+    quality = _data_quality(oi_by_institution, price)
     primary = results.loc[results["outcome_role"].eq("primary")]
     secondary = results.loc[results["outcome_role"].eq("secondary")]
     full_quantiles = results.loc[results["bin_set"].eq("full")]
@@ -353,6 +431,7 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "data_start": str(merged.index.min().date()),
         "data_end": str(merged.index.max().date()),
         "primary_outcome": "o1_c1",
+        "analysis_institutions": ",".join(oi_by_institution),
         "drive_folder_id": config.drive_folder_id,
     }
     (archive / "run_info.txt").write_text(
@@ -363,6 +442,7 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "# Futures OI finite-grid run\n\n"
         f"- Commit: {commit}\n"
         f"- Data: {run_info['data_start']} to {run_info['data_end']}\n"
+        f"- Institutions: {', '.join(oi_by_institution)}\n"
         f"- Primary rows: {len(primary):,}\n"
         f"- Secondary rows: {len(secondary):,}\n\n"
         "Interpretation and freeze decision require review of the generated robustness tables.\n"
