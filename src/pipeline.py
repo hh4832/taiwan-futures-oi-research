@@ -428,14 +428,15 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
     config_dict = asdict(config)
     with (archive / "config_used.json").open("w", encoding="utf-8") as handle:
         json.dump(config_dict, handle, ensure_ascii=False, indent=2)
+    date_index = merged.index.get_level_values("date")
     run_info = {
         "git_commit": commit,
         "timezone": config.timezone,
         "run_time": datetime.now(ZoneInfo(config.timezone)).isoformat(),
         "futures_key": futures_key,
         "price_keys": price_keys,
-        "data_start": str(merged.index.min().date()),
-        "data_end": str(merged.index.max().date()),
+        "data_start": str(date_index.min().date()),
+        "data_end": str(date_index.max().date()),
         "primary_outcome": "o1_c1",
         "analysis_institutions": ",".join(oi_by_institution),
         "drive_folder_id": config.drive_folder_id,
