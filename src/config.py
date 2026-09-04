@@ -12,6 +12,9 @@ class ResearchConfig:
     random_seed: int = 4832
     institutions: Tuple[str, ...] = ("外資及陸資", "投信", "自營商")
     primary_institutions: Tuple[str, ...] = ("外資及陸資",)
+    comparison_institutions: Tuple[str, ...] = (
+        "外資及陸資", "投信", "自營商", "三大法人合計"
+    )
     predictor_sides: Tuple[str, ...] = ("net", "long", "short")
     accumulation_windows: Tuple[int, ...] = (1, 3, 5, 10)
     rolling_windows: Tuple[int, ...] = (60, 120, 252)
