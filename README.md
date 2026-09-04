@@ -16,10 +16,16 @@ Freeze-candidate finite grid:
 - primary outcome: d1 open -> d1 close
 - secondary persistence: d1 open -> d2 / d3 / d5 / d10 / d20 close
 
-Primary institutions:
+Institution comparison:
 - 外資及陸資
 - 投信
 - 自營商
+- 三大法人合計（前三者在共同交易日逐日加總）
+
+外資是預先指定的主要法人；投信、自營商與三大法人合計屬完整保留的比較分析。
+Each institution is tested on the same finite grid. BH-FDR is corrected separately within
+each institution and analysis family, so adding an institution does not alter another
+institution's q-values.
 
 The grid is pre-specified. Do not select the isolated best-performing cell.
 
