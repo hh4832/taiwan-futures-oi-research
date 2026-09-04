@@ -153,11 +153,17 @@ def _build_analysis_oi(raw_futures, config: ResearchConfig) -> dict[str, pd.Data
     total = pd.DataFrame(index=aligned.index)
     total["long_oi"] = aligned.xs("long_oi", axis=1, level=1).sum(axis=1)
     total["short_oi"] = aligned.xs("short_oi", axis=1, level=1).sum(axis=1)
-    total["institution"] = "三大法人合計"
+    total_name = config.comparison_institutions[-1]
+    total["institution"] = total_name
     if total[["long_oi", "short_oi"]].isna().any().any():
         raise ValueError("Institutional total contains missing OI after date alignment")
 
-    return {**individual, "三大法人合計": total}
+    result = {**individual, total_name: total}
+    if tuple(result) != config.comparison_institutions:
+        raise ValueError(
+            "Configured comparison institutions do not match constructed OI datasets"
+        )
+    return result
 
 
 def _data_quality(
