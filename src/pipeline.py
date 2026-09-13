@@ -22,6 +22,12 @@ from .statistics import add_fdr_by_family, grouped_comparisons, hac_lag
 from .visualization import create_parameter_surface_figures
 
 
+def _git_branch() -> str:
+    return subprocess.check_output(
+        ["git", "branch", "--show-current"], text=True
+    ).strip()
+
+
 def _git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -362,6 +368,12 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         print(f"Selected futures key: {futures_key}")
         inspect_futures_schema(raw_futures)
     price, price_keys = load_0050_price(config.target_symbol)
+    expected_price_keys = {"open": "etl:adj_open", "close": "etl:adj_close"}
+    if price_keys != expected_price_keys:
+        raise RuntimeError(f"Adjusted-price validation failed: {price_keys}")
+    print("price_source_open=etl:adj_open")
+    print("price_source_close=etl:adj_close")
+    print("outcome_price_adjusted=True")
     returns = build_forward_returns(price, config.outcome_horizons)
     oi_by_institution = _build_analysis_oi(raw_futures, config)
     merged_parts = {}
@@ -430,7 +442,13 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         json.dump(config_dict, handle, ensure_ascii=False, indent=2)
     date_index = merged.index.get_level_values("date")
     run_info = {
+        "repository": "hh4832/taiwan-futures-oi-research",
+        "branch": _git_branch(),
         "git_commit": commit,
+        "price_source_open": price_keys["open"],
+        "price_source_close": price_keys["close"],
+        "outcome_price_adjusted": True,
+        "outcome_definition": "signal t; O1=adjusted_open[t+1]; Ck=adjusted_close[t+k] on trading-date rows",
         "timezone": config.timezone,
         "run_time": datetime.now(ZoneInfo(config.timezone)).isoformat(),
         "futures_key": futures_key,

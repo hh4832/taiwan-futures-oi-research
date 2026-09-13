@@ -10,8 +10,8 @@ FUTURES_DATASET_CANDIDATES = [
 ]
 
 PRICE_DATASET_CANDIDATES = {
-    "open": ["etl:adj_open", "price:開盤價"],
-    "close": ["etl:adj_close", "price:收盤價"],
+    "open": ["etl:adj_open"],
+    "close": ["etl:adj_close"],
 }
 
 

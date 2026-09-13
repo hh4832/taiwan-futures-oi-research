@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.finlab_loader import standardize_futures_oi
+from src.finlab_loader import PRICE_DATASET_CANDIDATES, standardize_futures_oi
 
 
 def test_loader_combines_legacy_and_current_symbol_names():
@@ -37,3 +37,10 @@ def test_loader_rejects_overlap_between_old_and_new_labels():
         assert "overlap" in str(exc)
     else:
         raise AssertionError("Expected overlapping labels to fail")
+
+
+def test_price_candidates_forbid_raw_fallback():
+    assert PRICE_DATASET_CANDIDATES == {
+        "open": ["etl:adj_open"],
+        "close": ["etl:adj_close"],
+    }
