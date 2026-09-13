@@ -1,45 +1,40 @@
-
 import os
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 
-FUTURES_DATASET_CANDIDATES = [
-    "futures_institutional_investors_trading_summary",
-]
+LONG_OI_KEY = "futures_institutional_investors_trading_summary:多方未平倉口數"
+SHORT_OI_KEY = "futures_institutional_investors_trading_summary:空方未平倉口數"
+NET_OI_KEY = "futures_institutional_investors_trading_summary:多空未平倉口數淨額"
 
 PRICE_DATASET_CANDIDATES = {
     "open": ["etl:adj_open"],
     "close": ["etl:adj_close"],
 }
 
-
-# 我們研究的是「臺股期貨」，不是 ETF、小台、MSCI 或其他商品
 FUTURES_SYMBOL_MAP = {
-    # FinLab changed the Taiwan-index-futures labels on 2024-04-17.
-    # Both names are required to preserve the continuous history.
-    "外資及陸資": ("台指_外資", "臺股期貨_外資及陸資"),
-    "投信": ("台指_投信", "臺股期貨_投信"),
-    "自營商": ("台指_自營商", "臺股期貨_自營商"),
+    "外資及陸資": "臺股期貨_外資及陸資",
+    "投信": "臺股期貨_投信",
+    "自營商": "臺股期貨_自營商",
 }
 
 
-def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_index(df: pd.DataFrame, source: str = "dataset") -> pd.DataFrame:
     out = pd.DataFrame(df).copy()
     out.index = pd.to_datetime(out.index)
-    out = out[~out.index.duplicated(keep="last")].sort_index()
-    return out
+    duplicate_dates = out.index[out.index.duplicated(keep=False)].unique()
+    if len(duplicate_dates):
+        preview = [str(value.date()) for value in duplicate_dates[:10]]
+        raise ValueError(f"Duplicate dates in {source}: {preview}")
+    return out.sort_index()
 
 
 def login_finlab():
     token = os.getenv("FINLAB_API_TOKEN")
-
     if not token:
-        raise EnvironmentError(
-            "Missing FINLAB_API_TOKEN."
-        )
-
+        raise EnvironmentError("Missing FINLAB_API_TOKEN.")
     from finlab import login
     login(token)
 
@@ -48,45 +43,30 @@ def get_first_available(keys: Iterable[str]):
     from finlab import data
 
     errors = []
-
     for key in keys:
         try:
             obj = data.get(key)
-
             if obj is not None:
                 return obj, key
-
         except Exception as exc:
             errors.append((key, repr(exc)))
-
-    raise RuntimeError(
-        f"No FinLab key worked. Tried: {errors}"
-    )
+    raise RuntimeError(f"No FinLab key worked. Tried: {errors}")
 
 
 def load_0050_price(
-    symbol: str = "0050"
+    symbol: str = "0050",
 ) -> tuple[pd.DataFrame, Dict[str, str]]:
-
     frames = {}
     selected = {}
-
     for side in ["open", "close"]:
-
-        raw, key = get_first_available(
-            PRICE_DATASET_CANDIDATES[side]
-        )
-
-        raw = _normalize_index(
-            pd.DataFrame(raw)
-        )
-
+        raw, key = get_first_available(PRICE_DATASET_CANDIDATES[side])
+        raw = _normalize_index(pd.DataFrame(raw), key)
         if symbol not in raw.columns:
-            raise KeyError(
-                f"{symbol} not found in {key}"
-            )
-
-        frames[side] = raw[symbol].astype(float)
+            raise KeyError(f"{symbol} not found in {key}")
+        values = pd.to_numeric(raw[symbol], errors="coerce")
+        if values.notna().sum() == 0:
+            raise ValueError(f"{symbol} in {key} contains no numeric observations")
+        frames[side] = values.astype(float)
         selected[side] = key
 
     price = pd.concat(
@@ -96,117 +76,121 @@ def load_0050_price(
         ],
         axis=1,
     ).sort_index()
-
     return price, selected
 
 
-def inspect_futures_schema(raw) -> None:
+def load_futures_raw() -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """Load continuously updated, field-specific FinLab OI matrices."""
+    from finlab import data
 
-    df = pd.DataFrame(raw)
+    keys = {"long": LONG_OI_KEY, "short": SHORT_OI_KEY, "net": NET_OI_KEY}
+    frames = {}
+    for side, key in keys.items():
+        raw = data.get(key)
+        if raw is None:
+            raise RuntimeError(f"FinLab returned no data for {key}")
+        frame = _normalize_index(pd.DataFrame(raw), key)
+        if frame.empty:
+            raise ValueError(f"FinLab returned an empty DataFrame for {key}")
+        frames[side] = frame
+    return frames, keys
 
-    print("Futures dataset shape:", df.shape)
-    print("Columns:", list(df.columns))
-    print()
 
-    print("Target symbols:")
-
-    for symbols in FUTURES_SYMBOL_MAP.values():
-        for symbol in symbols:
-            n = (df["symbol"] == symbol).sum()
-            print(f"{symbol}: {n:,} rows")
-
-
-def load_futures_raw():
-
-    raw, key = get_first_available(
-        FUTURES_DATASET_CANDIDATES
-    )
-
-    return raw, key
+def inspect_futures_schema(raw: Mapping[str, pd.DataFrame]) -> None:
+    for side in ("long", "short", "net"):
+        frame = pd.DataFrame(raw[side])
+        print(f"Futures {side} shape: {frame.shape}")
+        print(f"Futures {side} date range: {frame.index.min()} → {frame.index.max()}")
+        missing = [column for column in FUTURES_SYMBOL_MAP.values() if column not in frame]
+        if missing:
+            raise KeyError(f"Missing target columns in {side} OI field: {missing}")
 
 
 def standardize_futures_oi(
-    raw,
-    institution: str
+    raw: Mapping[str, pd.DataFrame],
+    institution: str,
 ) -> pd.DataFrame:
-
     if institution not in FUTURES_SYMBOL_MAP:
+        raise ValueError(f"Unknown institution: {institution}")
+    if not {"long", "short"}.issubset(raw):
+        raise ValueError("Field-specific OI input must contain long and short frames")
+
+    target = FUTURES_SYMBOL_MAP[institution]
+    selected = {}
+    valid_dates = {}
+    for side in ("long", "short"):
+        frame = _normalize_index(pd.DataFrame(raw[side]), f"{side}_oi")
+        if target not in frame.columns:
+            raise KeyError(f"Target column {target} not found in {side} OI field")
+        values = pd.to_numeric(frame[target], errors="coerce")
+        if values.notna().sum() == 0:
+            raise ValueError(f"Numeric conversion removed all {side} OI for {institution}")
+        selected[side] = values
+        valid_dates[side] = values.dropna().index
+
+    if not valid_dates["long"].equals(valid_dates["short"]):
+        long_only = valid_dates["long"].difference(valid_dates["short"])
+        short_only = valid_dates["short"].difference(valid_dates["long"])
         raise ValueError(
-            f"Unknown institution: {institution}"
+            f"Long/short date alignment failed for {institution}: "
+            f"long_only={len(long_only)}, short_only={len(short_only)}"
         )
 
-    target_symbols = FUTURES_SYMBOL_MAP[institution]
-
-    df = pd.DataFrame(raw).copy()
-
-    required = {
-        "symbol",
-        "date",
-        "多方未平倉口數",
-        "空方未平倉口數",
-    }
-
-    missing = required.difference(df.columns)
-
-    if missing:
-        raise ValueError(
-            f"Missing futures columns: {sorted(missing)}"
-        )
-
-    # Exact match，非常重要
-    work = df.loc[
-        df["symbol"].isin(target_symbols),
-        [
-            "date",
-            "多方未平倉口數",
-            "空方未平倉口數",
-        ],
-    ].copy()
-
-    if work.empty:
-        raise ValueError(
-            f"No data found for {target_symbols}"
-        )
-
-    work["date"] = pd.to_datetime(work["date"])
-
-    work["long_oi"] = pd.to_numeric(
-        work["多方未平倉口數"],
-        errors="coerce"
-    )
-
-    work["short_oi"] = pd.to_numeric(
-        work["空方未平倉口數"],
-        errors="coerce"
-    )
-
-    work = (
-        work
-        .set_index("date")
-        [["long_oi", "short_oi"]]
-        .sort_index()
-    )
-
-    duplicate_dates = work.index[work.index.duplicated(keep=False)].unique()
-    if len(duplicate_dates):
-        raise ValueError(
-            "Legacy/current futures symbols overlap on dates: "
-            f"{[str(x.date()) for x in duplicate_dates[:10]]}"
-        )
-
+    work = pd.concat(
+        [selected["long"].rename("long_oi"), selected["short"].rename("short_oi")],
+        axis=1,
+    ).sort_index()
+    first_valid = valid_dates["long"].min()
+    last_valid = valid_dates["long"].max()
+    work = work.loc[first_valid:last_valid]
     work["institution"] = institution
 
+    if "net" in raw:
+        net_frame = _normalize_index(pd.DataFrame(raw["net"]), "net_oi_validation")
+        if target not in net_frame.columns:
+            raise KeyError(f"Target column {target} not found in net OI validation field")
+        reported = pd.to_numeric(net_frame[target], errors="coerce").reindex(work.index)
+        comparable = reported.notna()
+        calculated = work["long_oi"] - work["short_oi"]
+        mismatch = comparable & ~np.isclose(calculated, reported, equal_nan=False)
+        if mismatch.any():
+            raise ValueError(
+                f"Long - short != reported net OI for {institution}: "
+                f"{int(mismatch.sum())} mismatches"
+            )
+
     print(
-        f"{' + '.join(target_symbols)}: "
-        f"{len(work):,} observations, "
-        f"{work.index.min().date()} "
-        f"→ {work.index.max().date()}"
+        f"{target}: {len(work):,} observations, "
+        f"long {valid_dates['long'].min().date()} → {valid_dates['long'].max().date()}, "
+        f"short {valid_dates['short'].min().date()} → {valid_dates['short'].max().date()}"
     )
-
     if len(work) < 1_000:
-        raise ValueError(
-            f"Insufficient OI history for {institution}: {len(work):,} rows. "
-            "Expected legacy and current FinLab symbols to produce at least 1,000 rows."
-        )
-
+        raise ValueError(f"Insufficient OI history for {institution}: {len(work):,} rows")
+    work.attrs.update(
+        source_api_type="field_specific",
+        target_column=target,
+        first_long_date=valid_dates["long"].min(),
+        last_long_date=valid_dates["long"].max(),
+        first_short_date=valid_dates["short"].min(),
+        last_short_date=valid_dates["short"].max(),
+    )
     return work
+
+
+def validate_latest_non_null_dates(
+    oi_by_institution: Mapping[str, pd.DataFrame],
+) -> None:
+    """Fail when one target institution silently stops before the others."""
+    individual = [frame for frame in oi_by_institution.values() if frame.attrs.get("target_column")]
+    if not individual:
+        return
+    latest = max(frame.attrs["last_long_date"] for frame in individual)
+    for frame in individual:
+        institution = str(frame["institution"].iloc[0])
+        for side in ("long", "short"):
+            value = frame.attrs[f"last_{side}_date"]
+            if value != latest:
+                raise ValueError(
+                    f"Latest non-null {side} date for {institution} is {value.date()}, "
+                    f"but target-institution maximum is {latest.date()}"
+                )

@@ -123,4 +123,35 @@ def add_fdr_by_family(
             out.loc[valid.index, "q_value_bh"] = multipletests(
                 valid.to_numpy(), method="fdr_bh"
             )[1]
+    out["q_value_family"] = out["q_value_bh"]
+    return out
+
+
+def add_global_fdr(
+    results: pd.DataFrame,
+    horizon_col: str = "outcome_horizon",
+    p_col: str = "hac_p_value",
+) -> pd.DataFrame:
+    """Apply BH-FDR to every pre-specified row, separately by outcome horizon."""
+    out = results.copy()
+    out["q_value_global"] = np.nan
+    for _, index in out.groupby(horizon_col, dropna=False).groups.items():
+        valid = out.loc[index, p_col].dropna()
+        if len(valid):
+            out.loc[valid.index, "q_value_global"] = multipletests(
+                valid.to_numpy(), method="fdr_bh"
+            )[1]
+
+    out["significant_raw_05"] = out[p_col].lt(0.05).fillna(False)
+    out["significant_family_fdr_05"] = out["q_value_family"].lt(0.05).fillna(False)
+    out["significant_global_fdr_05"] = out["q_value_global"].lt(0.05).fillna(False)
+
+    conditions = [
+        out[p_col].isna(),
+        out["significant_global_fdr_05"],
+        out["significant_family_fdr_05"],
+        out["significant_raw_05"],
+    ]
+    choices = ["Not evaluable", "Level A", "Level B", "Level C"]
+    out["evidence_level"] = np.select(conditions, choices, default="Level D")
     return out

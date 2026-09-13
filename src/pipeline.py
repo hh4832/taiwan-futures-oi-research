@@ -11,14 +11,19 @@ import pandas as pd
 from .config import CONFIG, ResearchConfig
 from .features import build_oi_features
 from .finlab_loader import (
+    FUTURES_SYMBOL_MAP,
+    LONG_OI_KEY,
+    NET_OI_KEY,
+    SHORT_OI_KEY,
     inspect_futures_schema,
     load_0050_price,
     load_futures_raw,
     login_finlab,
     standardize_futures_oi,
+    validate_latest_non_null_dates,
 )
 from .returns import build_forward_returns
-from .statistics import add_fdr_by_family, grouped_comparisons, hac_lag
+from .statistics import add_fdr_by_family, add_global_fdr, grouped_comparisons, hac_lag
 from .visualization import create_parameter_surface_figures
 
 
@@ -145,6 +150,7 @@ def _build_analysis_oi(raw_futures, config: ResearchConfig) -> dict[str, pd.Data
         institution: standardize_futures_oi(raw_futures, institution)
         for institution in config.institutions
     }
+    validate_latest_non_null_dates(individual)
     aligned = pd.concat(
         {
             institution: frame[["long_oi", "short_oi"]]
@@ -177,30 +183,38 @@ def _data_quality(
     price: pd.DataFrame,
 ) -> pd.DataFrame:
     rows = []
-    datasets = [(f"oi_{institution}", frame) for institution, frame in oi_by_institution.items()]
-    datasets.append(("price", price))
-    for name, frame in datasets:
-        rows.extend(
+    for institution, frame in oi_by_institution.items():
+        gross = frame["long_oi"] + frame["short_oi"]
+        rows.append(
             {
-                "dataset": name,
-                "check": f"missing_{column}",
-                "value": int(frame[column].isna().sum()),
+                "dataset": f"oi_{institution}",
+                "institution": institution,
+                "source_api_type": "field_specific",
+                "long_source_key": LONG_OI_KEY,
+                "short_source_key": SHORT_OI_KEY,
+                "target_column": FUTURES_SYMBOL_MAP.get(institution, "derived_sum"),
+                "first_date": str(frame.index.min().date()),
+                "last_date": str(frame.index.max().date()),
+                "missing_long_oi": int(frame["long_oi"].isna().sum()),
+                "missing_short_oi": int(frame["short_oi"].isna().sum()),
+                "duplicate_dates": int(frame.index.duplicated().sum()),
+                "date_monotonic": bool(frame.index.is_monotonic_increasing),
+                "zero_gross_oi": int(gross.eq(0).sum()),
             }
-            for column in frame.columns
         )
-        rows.extend(
-            [
-                {"dataset": name, "check": "duplicate_dates", "value": int(frame.index.duplicated().sum())},
-                {"dataset": name, "check": "date_monotonic", "value": bool(frame.index.is_monotonic_increasing)},
-                {"dataset": name, "check": "first_date", "value": str(frame.index.min().date())},
-                {"dataset": name, "check": "last_date", "value": str(frame.index.max().date())},
-            ]
-        )
-        if name.startswith("oi_") and {"long_oi", "short_oi"}.issubset(frame.columns):
-            gross = frame["long_oi"] + frame["short_oi"]
-            rows.append(
-                {"dataset": name, "check": "zero_gross_oi", "value": int(gross.eq(0).sum())}
-            )
+    rows.append(
+        {
+            "dataset": "price_0050",
+            "institution": "",
+            "source_api_type": "adjusted_price",
+            "first_date": str(price.index.min().date()),
+            "last_date": str(price.index.max().date()),
+            "missing_open_0050": int(price["open_0050"].isna().sum()),
+            "missing_close_0050": int(price["close_0050"].isna().sum()),
+            "duplicate_dates": int(price.index.duplicated().sum()),
+            "date_monotonic": bool(price.index.is_monotonic_increasing),
+        }
+    )
     return pd.DataFrame(rows)
 
 
@@ -351,10 +365,64 @@ def _outlier_robustness(
     return pd.DataFrame(rows)
 
 
+def _post_period_validation(
+    merged: pd.DataFrame,
+    config: ResearchConfig,
+) -> pd.DataFrame:
+    """Compare the frozen foreign-net grid before and after the legacy cutoff."""
+    cutoff = pd.Timestamp("2024-04-30")
+    periods = {
+        "original_baseline": merged.index <= cutoff,
+        "post_period": merged.index > cutoff,
+        "updated_full_sample": pd.Series(True, index=merged.index),
+    }
+    rows = []
+    for accumulation in config.accumulation_windows:
+        predictor = f"net_change_ratio_{accumulation}d"
+        for rolling_window in config.rolling_windows:
+            specifications = (
+                (
+                    "percentile",
+                    f"{predictor}_pr{rolling_window}",
+                    config.percentile_bins,
+                    config.percentile_labels,
+                    ("PR_0_20", "PR_80_100"),
+                ),
+                (
+                    "zscore",
+                    f"{predictor}_z{rolling_window}",
+                    config.zscore_bins,
+                    config.zscore_labels,
+                    ("Z_LT_M2_5", "Z_GE_P2_5"),
+                ),
+            )
+            for method, score_col, bins, labels, extremes in specifications:
+                for period_name, period_mask in periods.items():
+                    sample = merged.loc[period_mask]
+                    table = grouped_comparisons(
+                        sample, score_col, "o1_c1", bins, labels,
+                        hac_lag(accumulation, 1),
+                    )
+                    table = table.loc[table["group"].isin(extremes)].copy()
+                    table["sample_period"] = period_name
+                    table["institution"] = "外資及陸資"
+                    table["side"] = "net"
+                    table["predictor"] = predictor
+                    table["accumulation_window"] = accumulation
+                    table["rolling_window"] = rolling_window
+                    table["standardization"] = method
+                    table["outcome"] = "o1_c1"
+                    rows.append(table)
+    out = pd.concat(rows, ignore_index=True)
+    out = add_fdr_by_family(out, family_cols=("sample_period", "standardization"))
+    out["outcome_horizon"] = 1
+    return add_global_fdr(out)
+
+
 def _make_archive(output_root: str | Path, config: ResearchConfig) -> tuple[Path, str]:
     commit = _git_commit()
     timestamp = datetime.now(ZoneInfo(config.timezone)).strftime("%Y%m%d_%H%M%S")
-    archive = Path(output_root) / f"{timestamp}_{commit[:8]}"
+    archive = Path(output_root) / f"{timestamp}_{config.research_version}_{commit[:8]}"
     archive.mkdir(parents=True, exist_ok=False)
     (archive / "figures").mkdir()
     return archive, commit
@@ -363,9 +431,9 @@ def _make_archive(output_root: str | Path, config: ResearchConfig) -> tuple[Path
 def run_research(output_root="outputs", inspect_schema=True, config: ResearchConfig = CONFIG):
     np.random.seed(config.random_seed)
     login_finlab()
-    raw_futures, futures_key = load_futures_raw()
+    raw_futures, futures_keys = load_futures_raw()
     if inspect_schema:
-        print(f"Selected futures key: {futures_key}")
+        print(f"Selected futures keys: {futures_keys}")
         inspect_futures_schema(raw_futures)
     price, price_keys = load_0050_price(config.target_symbol)
     expected_price_keys = {"open": "etl:adj_open", "close": "etl:adj_close"}
@@ -401,12 +469,16 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         outlier_parts.append(outliers)
 
     results = pd.concat(result_parts, ignore_index=True)
+    results = add_global_fdr(results)
     merged = pd.concat(merged_parts, names=["institution", "date"])
     annual = pd.concat(annual_parts, ignore_index=True)
     eras = pd.concat(era_parts, ignore_index=True)
     events = pd.concat(event_parts, ignore_index=True)
     nonoverlap = pd.concat(nonoverlap_parts, ignore_index=True)
     outliers = pd.concat(outlier_parts, ignore_index=True)
+    post_period = _post_period_validation(
+        merged_parts[config.primary_institutions[0]], config
+    )
     archive, commit = _make_archive(output_root, config)
 
     quality = _data_quality(oi_by_institution, price)
@@ -416,6 +488,13 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
     surface = results.loc[
         results["bin_set"].isin(["coarse", "zscore"])
         & ~results["direction"].eq("middle")
+    ]
+    global_columns = [
+        "institution", "side", "predictor", "accumulation_window",
+        "rolling_window", "standardization", "group", "outcome",
+        "outcome_horizon", "n", "mean_return", "median_return",
+        "positive_rate", "mean_nongroup", "mean_diff_vs_nongroup",
+        "hac_p_value", "q_value_family", "q_value_global", "evidence_level",
     ]
 
     outputs = {
@@ -431,6 +510,8 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "nonoverlap_results.csv": nonoverlap,
         "outlier_robustness.csv": outliers,
         "parameter_surface_summary.csv": surface,
+        "global_fdr_summary.csv": results.loc[:, global_columns],
+        "post_period_validation.csv": post_period,
     }
     for filename, frame in outputs.items():
         frame.to_csv(archive / filename, index=False, encoding="utf-8-sig")
@@ -443,22 +524,38 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
     date_index = merged.index.get_level_values("date")
     run_info = {
         "repository": "hh4832/taiwan-futures-oi-research",
-        "branch": _git_branch(),
+        "git_branch": _git_branch(),
         "git_commit": commit,
+        "research_version": config.research_version,
         "price_source_open": price_keys["open"],
         "price_source_close": price_keys["close"],
         "outcome_price_adjusted": True,
         "outcome_definition": "signal t; O1=adjusted_open[t+1]; Ck=adjusted_close[t+k] on trading-date rows",
         "timezone": config.timezone,
         "run_time": datetime.now(ZoneInfo(config.timezone)).isoformat(),
-        "futures_key": futures_key,
+        "futures_long_oi_key": futures_keys["long"],
+        "futures_short_oi_key": futures_keys["short"],
+        "futures_net_oi_validation_key": futures_keys["net"],
         "price_keys": price_keys,
         "data_start": str(date_index.min().date()),
         "data_end": str(date_index.max().date()),
         "primary_outcome": "o1_c1",
+        "multiple_testing_method": "BH",
+        "family_fdr": True,
+        "global_fdr": True,
+        "global_fdr_primary_outcome": "o1_c1",
+        "secondary_global_fdr_mode": "by_horizon",
         "analysis_institutions": ",".join(oi_by_institution),
-        "drive_folder_id": config.drive_folder_id,
+        "drive_root_folder_id": config.drive_folder_id,
+        "archive_name": archive.name,
     }
+    prefixes = {"外資及陸資": "foreign", "投信": "trust", "自營商": "dealer"}
+    for institution, prefix in prefixes.items():
+        frame = oi_by_institution[institution]
+        run_info[f"{prefix}_first_long_date"] = str(frame.attrs["first_long_date"].date())
+        run_info[f"{prefix}_last_long_date"] = str(frame.attrs["last_long_date"].date())
+        run_info[f"{prefix}_first_short_date"] = str(frame.attrs["first_short_date"].date())
+        run_info[f"{prefix}_last_short_date"] = str(frame.attrs["last_short_date"].date())
     (archive / "run_info.txt").write_text(
         "\n".join(f"{key}={value}" for key, value in run_info.items()) + "\n",
         encoding="utf-8",
@@ -470,6 +567,7 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         f"- Institutions: {', '.join(oi_by_institution)}\n"
         f"- Primary rows: {len(primary):,}\n"
         f"- Secondary rows: {len(secondary):,}\n\n"
+        f"- Global FDR Level A rows: {int(results['evidence_level'].eq('Level A').sum()):,}\n"
         "Interpretation and freeze decision require review of the generated robustness tables.\n"
     )
     (archive / "research_summary.md").write_text(summary, encoding="utf-8")

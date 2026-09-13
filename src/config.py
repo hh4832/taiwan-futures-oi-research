@@ -37,7 +37,8 @@ class ResearchConfig:
         "Z_LT_M2_5", "Z_M2_5_M1_5", "Z_M1_5_M0_5", "Z_M0_5_P0_5",
         "Z_P0_5_P1_5", "Z_P1_5_P2_5", "Z_GE_P2_5",
     )
-    drive_folder_id: str = "1kRfLhTLdHevVuFkEzdZH9M5wEui7JuEg"
+    drive_folder_id: str = "1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG"
+    research_version: str = "v2_data_refresh_global_fdr"
 
     def __post_init__(self):
         if self.min_periods_by_window is None:
