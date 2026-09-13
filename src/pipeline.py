@@ -10,6 +10,15 @@ import pandas as pd
 
 from .config import CONFIG, ResearchConfig
 from .features import build_oi_features
+from .horizon_nonoverlap import analyze_horizon_nonoverlap
+from .incremental_decay import analyze_incremental_decay
+from .institutional_divergence import (
+    analyze_divergence_surface,
+    build_divergence_features,
+    divergence_regressions,
+    divergence_robustness,
+    institutional_composite_comparison,
+)
 from .finlab_loader import (
     FUTURES_SYMBOL_MAP,
     LONG_OI_KEY,
@@ -22,7 +31,8 @@ from .finlab_loader import (
     standardize_futures_oi,
     validate_latest_non_null_dates,
 )
-from .returns import build_forward_returns
+from .prior_return import analyze_prior_return_conditioning
+from .returns import build_forward_returns, build_incremental_returns, build_prior_returns
 from .statistics import add_fdr_by_family, add_global_fdr, grouped_comparisons, hac_lag
 from .visualization import create_parameter_surface_figures
 
@@ -176,6 +186,94 @@ def _build_analysis_oi(raw_futures, config: ResearchConfig) -> dict[str, pd.Data
             "Configured comparison institutions do not match constructed OI datasets"
         )
     return result
+
+
+def _build_foreign_trust_oi(
+    oi_by_institution: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Build Foreign+Trust underlying OI before normalization."""
+    aligned = oi_by_institution["外資及陸資"][["long_oi", "short_oi"]].join(
+        oi_by_institution["投信"][["long_oi", "short_oi"]],
+        how="inner", lsuffix="_foreign", rsuffix="_trust",
+    )
+    out = pd.DataFrame(index=aligned.index)
+    out["long_oi"] = aligned["long_oi_foreign"] + aligned["long_oi_trust"]
+    out["short_oi"] = aligned["short_oi_foreign"] + aligned["short_oi_trust"]
+    out["institution"] = "外資+投信"
+    return out
+
+
+def _write_v3_summary(archive: Path, tables: dict[str, pd.DataFrame], commit: str):
+    prior = tables["prior"]
+    decay = tables["decay"]
+    nonoverlap = tables["nonoverlap"]
+    divergence = tables["divergence_primary"]
+    monotonic = tables["monotonic"]
+    regressions = tables["regressions"]
+    comparison = tables["comparison"]
+    strongest_prior = (
+        prior.groupby("lookback")["effect_attenuation_ratio"].median().abs().idxmax()
+        if prior["effect_attenuation_ratio"].notna().any() else "無法判定"
+    )
+    dealer_joint = regressions.loc[
+        regressions["model"].eq("foreign_plus_dealer")
+        & regressions["term"].eq("dealer_pr")
+    ]
+    best_decay = (
+        decay.groupby("interval")["median_effect_across_12_cells"].median().abs().idxmax()
+        if decay["median_effect_across_12_cells"].notna().any() else "無法判定"
+    )
+    nonoverlap_consistency = (
+        nonoverlap["number_offsets_expected_direction"].sum()
+        / nonoverlap["total_offsets"].sum()
+        if nonoverlap["total_offsets"].sum() else np.nan
+    )
+    expected_divergence = np.where(
+        divergence["group"].eq("Strong bearish"),
+        divergence["mean_diff_vs_nongroup"].lt(0),
+        divergence["mean_diff_vs_nongroup"].gt(0),
+    )
+    med_effect = comparison.groupby("predictor")["mean_diff_vs_nongroup"].apply(
+        lambda s: s.abs().median()
+    )
+    divergence_vs_foreign = (
+        "較大" if med_effect.get("foreign_minus_dealer_percentile", np.nan)
+        > med_effect.get("foreign_alone", np.nan) else "未較大"
+    )
+    aggregate_removed = (
+        "改善" if med_effect.get("aggregate_minus_dealer_foreign_plus_trust", np.nan)
+        > med_effect.get("aggregate", np.nan) else "未改善"
+    )
+    text = f"""# v3 Foreign robustness and Dealer divergence
+
+- Commit: {commit}
+- Phase A: confirmatory robustness
+- Phase B: exploratory new predictor
+- New Z-score analysis: False
+
+## Phase A
+
+1. Prior-return conditioning: {int(prior['q_value_global'].lt(.05).sum())} adjusted cells pass Universe-A Global FDR; direction and magnitude are retained in the full table.
+2. The largest median absolute attenuation is associated with Prior {strongest_prior}D.
+3. Incremental decay uses compounded price-ratio buckets; the largest median absolute separation occurs in `{best_decay}`. Cumulative C20 evidence is not interpreted as Day-20 alpha.
+4. Horizon-specific non-overlap retains every offset for H=2/3/5/10/20; {nonoverlap_consistency:.1%} of offsets have the expected direction, with no best-offset selection.
+
+## Phase B
+
+5. Foreign–Dealer divergence is Foreign causal percentile minus Dealer causal percentile; {int(expected_divergence.sum())}/24 extreme cells have the expected direction.
+6. The independent 24-hypothesis divergence universe has {int(divergence['q_value_global'].lt(.05).sum())} Level-A cells.
+7. Median five-bucket monotonicity is {monotonic['monotonic_order_score'].median():.1f}/4 across the frozen 12-cell surface.
+8. Dealer has raw HAC p < 0.05 in {int(dealer_joint['hac_p_value'].lt(.05).sum())}/12 joint-model cells after controlling Foreign.
+9. By median absolute group separation, divergence is {divergence_vs_foreign} than Foreign alone.
+10. Removing Dealer from Aggregate is classified as `{aggregate_removed}` by the same descriptive comparison. Foreign+Trust is constructed from underlying OI before normalization.
+
+## Research judgment
+
+- Phase A modules: 修改後再測，應依 q-values、attenuation、decay 與 multi-offset consistency 判讀。
+- Foreign–Dealer divergence: 保留作為 prospective-validation candidate at most; it is not a validated trading signal.
+"""
+    (archive / "research_summary_v3.md").write_text(text, encoding="utf-8")
+    (archive / "research_summary.md").write_text(text, encoding="utf-8")
 
 
 def _data_quality(
@@ -479,6 +577,35 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
     post_period = _post_period_validation(
         merged_parts[config.primary_institutions[0]], config
     )
+
+    foreign = merged_parts[config.primary_institutions[0]].join(
+        build_prior_returns(price, config.prior_return_windows), how="left"
+    ).join(build_incremental_returns(price), how="left")
+    prior_results, prior_summary = analyze_prior_return_conditioning(foreign, config)
+    decay_results, decay_summary = analyze_incremental_decay(foreign, config)
+    horizon_nonoverlap, horizon_nonoverlap_summary = analyze_horizon_nonoverlap(
+        foreign, config
+    )
+
+    divergence_frame = build_divergence_features(
+        merged_parts["外資及陸資"], merged_parts["自營商"], config
+    ).join(returns[["o1_c1"]], how="left")
+    divergence_surface, divergence_primary, divergence_monotonic = (
+        analyze_divergence_surface(divergence_frame, config)
+    )
+    divergence_regression = divergence_regressions(divergence_frame, config)
+    divergence_robust = divergence_robustness(divergence_frame, config)
+    foreign_trust = build_oi_features(
+        _build_foreign_trust_oi(oi_by_institution),
+        accumulation_windows=config.accumulation_windows,
+        rolling_windows=config.rolling_windows,
+        min_periods_by_window=config.min_periods_by_window,
+    ).join(returns, how="inner")
+    comparison_frames = dict(merged_parts)
+    comparison_frames["外資+投信"] = foreign_trust
+    composite_comparison = institutional_composite_comparison(
+        comparison_frames, divergence_frame, config
+    )
     archive, commit = _make_archive(output_root, config)
 
     quality = _data_quality(oi_by_institution, price)
@@ -512,6 +639,22 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "parameter_surface_summary.csv": surface,
         "global_fdr_summary.csv": results.loc[:, global_columns],
         "post_period_validation.csv": post_period,
+        "prior_return_conditioning.csv": prior_results,
+        "prior_return_summary.csv": prior_summary,
+        "incremental_decay_results.csv": decay_results,
+        "incremental_decay_summary.csv": decay_summary,
+        "horizon_nonoverlap_results.csv": horizon_nonoverlap,
+        "horizon_nonoverlap_summary.csv": horizon_nonoverlap_summary,
+        "foreign_dealer_divergence_primary.csv": divergence_primary,
+        "foreign_dealer_divergence_surface.csv": divergence_surface,
+        "foreign_dealer_divergence_fdr.csv": divergence_primary,
+        "foreign_dealer_divergence_regression.csv": divergence_regression,
+        "foreign_dealer_divergence_annual.csv": divergence_robust["annual"],
+        "foreign_dealer_divergence_era.csv": divergence_robust["era"],
+        "foreign_dealer_divergence_outlier.csv": divergence_robust["outlier"],
+        "foreign_dealer_divergence_event_entry.csv": divergence_robust["event_entry"],
+        "institutional_composite_comparison.csv": composite_comparison,
+        "foreign_dealer_divergence_monotonicity.csv": divergence_monotonic,
     }
     for filename, frame in outputs.items():
         frame.to_csv(archive / filename, index=False, encoding="utf-8-sig")
@@ -548,6 +691,18 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "analysis_institutions": ",".join(oi_by_institution),
         "drive_root_folder_id": config.drive_folder_id,
         "archive_name": archive.name,
+        "oi_source": "field_specific",
+        "phase_a_prior_return": True,
+        "phase_a_incremental_decay": True,
+        "phase_a_horizon_nonoverlap": True,
+        "phase_b_foreign_dealer_divergence": True,
+        "zscore_new_analysis": False,
+        "accumulation_windows": ",".join(map(str, config.accumulation_windows)),
+        "rolling_windows": ",".join(map(str, config.rolling_windows)),
+        "prior_return_windows": ",".join(map(str, config.prior_return_windows)),
+        "divergence_definition": "foreign_percentile_minus_dealer_percentile",
+        "divergence_primary_outcome": "o1_c1",
+        "divergence_primary_extreme_threshold": 0.60,
     }
     prefixes = {"外資及陸資": "foreign", "投信": "trust", "自營商": "dealer"}
     for institution, prefix in prefixes.items():
@@ -560,16 +715,14 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "\n".join(f"{key}={value}" for key, value in run_info.items()) + "\n",
         encoding="utf-8",
     )
-    summary = (
-        "# Futures OI finite-grid run\n\n"
-        f"- Commit: {commit}\n"
-        f"- Data: {run_info['data_start']} to {run_info['data_end']}\n"
-        f"- Institutions: {', '.join(oi_by_institution)}\n"
-        f"- Primary rows: {len(primary):,}\n"
-        f"- Secondary rows: {len(secondary):,}\n\n"
-        f"- Global FDR Level A rows: {int(results['evidence_level'].eq('Level A').sum()):,}\n"
-        "Interpretation and freeze decision require review of the generated robustness tables.\n"
-    )
-    (archive / "research_summary.md").write_text(summary, encoding="utf-8")
+    _write_v3_summary(archive, {
+        "prior": prior_results,
+        "decay": decay_summary,
+        "nonoverlap": horizon_nonoverlap_summary,
+        "divergence_primary": divergence_primary,
+        "monotonic": divergence_monotonic,
+        "regressions": divergence_regression,
+        "comparison": composite_comparison,
+    }, commit)
     print(f"Saved archive: {archive}")
     return merged, results, archive

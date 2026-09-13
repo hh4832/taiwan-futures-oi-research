@@ -1,4 +1,4 @@
-# Taiwan Futures Institutional OI Research
+# Taiwan Futures Institutional OI Research — v3
 
 Research scaffold for testing whether Taiwan futures institutional open-interest positioning predicts future 0050 returns.
 
@@ -89,3 +89,31 @@ This makes results traceable to a specific commit.
 Evidence levels: Level A passes global FDR; Level B passes family FDR only;
 Level C passes only raw HAC; Level D does not pass raw HAC; missing HAC p-values
 are `Not evaluable`.
+
+## v3: Foreign robustness and Dealer divergence
+
+The v2 finite grid remains frozen. Version
+`v3_foreign_robustness_dealer_divergence` adds four bounded modules without
+introducing any new accumulation window, rolling window, percentile cutoff, or
+Z-score analysis:
+
+1. Prior 1/3/5/10-day adjusted-close return conditioning of the Foreign net
+   percentile signal.
+2. Compounded incremental outcomes: O1→C1, C1→C3, C3→C5, C5→C10, and
+   C10→C20.
+3. Proper H-offset non-overlap for C2/C3/C5/C10/C20, where sampling stride is
+   the outcome horizon rather than the accumulation window.
+4. Exploratory Foreign–Dealer divergence, defined as matching-cell Foreign
+   percentile minus Dealer percentile, across the frozen 12-cell grid.
+
+The divergence primary FDR universe contains exactly 24 hypotheses: 12 cells ×
+the pre-specified Strong bearish and Strong bullish groups. It is separate from
+the v2 global FDR and can at most become a prospective-validation candidate.
+Foreign+Trust is calculated by combining underlying long/short OI first, then
+computing its change ratio and causal percentile; institutional percentiles are
+never added together.
+
+The canonical Drive root remains folder
+`1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG`. New archives use
+`YYYYMMDD_HHMMSS_v3_foreign_robustness_dealer_divergence_<commit8>` and do not
+overwrite v2 archives.

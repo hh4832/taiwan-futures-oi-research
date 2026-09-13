@@ -4,7 +4,7 @@ from typing import Mapping, Tuple
 
 @dataclass(frozen=True)
 class ResearchConfig:
-    """Pre-specified finite grid for the futures OI freeze candidate."""
+    """Frozen v2 grid plus bounded v3 robustness and divergence parameters."""
 
     start_date: str = "2007-07-02"
     target_symbol: str = "0050"
@@ -21,6 +21,13 @@ class ResearchConfig:
     min_periods_by_window: Mapping[int, int] = None
     primary_outcomes: Tuple[int, ...] = (1,)
     secondary_outcomes: Tuple[int, ...] = (2, 3, 5, 10, 20)
+    prior_return_windows: Tuple[int, ...] = (1, 3, 5, 10)
+    nonoverlap_horizons: Tuple[int, ...] = (2, 3, 5, 10, 20)
+    divergence_thresholds: Tuple[float, ...] = (-0.60, -0.20, 0.20, 0.60)
+    divergence_labels: Tuple[str, ...] = (
+        "Strong bearish", "Moderate bearish", "Neutral",
+        "Moderate bullish", "Strong bullish",
+    )
     percentile_bins: Tuple[float, ...] = (0.0, 0.20, 0.80, 1.0)
     percentile_labels: Tuple[str, ...] = ("PR_0_20", "PR_20_80", "PR_80_100")
     full_percentile_bins: Tuple[float, ...] = (
@@ -38,7 +45,7 @@ class ResearchConfig:
         "Z_P0_5_P1_5", "Z_P1_5_P2_5", "Z_GE_P2_5",
     )
     drive_folder_id: str = "1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG"
-    research_version: str = "v2_data_refresh_global_fdr"
+    research_version: str = "v3_foreign_robustness_dealer_divergence"
 
     def __post_init__(self):
         if self.min_periods_by_window is None:
