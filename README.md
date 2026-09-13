@@ -47,7 +47,7 @@ Important:
 pip install -r requirements.txt
 ```
 
-Set FINLAB_API_TOKEN as an environment variable or Colab secret. Never commit it.
+Set `FINLAB_API_TOKEN` as an environment variable or Colab Secret. Never commit it.
 
 Run:
 
@@ -67,13 +67,16 @@ daily, results, archive = run_research()
 ## Colab workflow
 
 1. Open `notebooks/01_run_research.ipynb` from GitHub in Colab.
-2. Edit `REPO_URL` once to point to your repository.
+2. The public repository is cloned without a GitHub token. `GITHUB_TOKEN` is only
+   needed for a future authenticated write or push workflow.
 3. Run cells from top to bottom.
 4. During validation the notebook clones `research/futures-finite-grid-robustness`;
    after an authorized merge, change this setting to `main`.
 5. Colab displays the exact Git commit hash used for the analysis.
 6. A timestamped archive is uploaded beneath Google Drive folder ID
    `1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG`.
+7. The Drive root is managed by `src.config.DRIVE_ROOT_FOLDER_ID`; the notebook
+   imports it and does not require a manually defined `DRIVE_FOLDER_ID`.
 
 This makes results traceable to a specific commit.
 

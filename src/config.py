@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from typing import Mapping, Tuple
 
 
+DRIVE_ROOT_FOLDER_ID = "1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG"
+
+
 @dataclass(frozen=True)
 class ResearchConfig:
     """Frozen v2 grid plus bounded v3 robustness and divergence parameters."""
@@ -44,7 +47,7 @@ class ResearchConfig:
         "Z_LT_M2_5", "Z_M2_5_M1_5", "Z_M1_5_M0_5", "Z_M0_5_P0_5",
         "Z_P0_5_P1_5", "Z_P1_5_P2_5", "Z_GE_P2_5",
     )
-    drive_folder_id: str = "1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG"
+    drive_folder_id: str = DRIVE_ROOT_FOLDER_ID
     research_version: str = "v3_foreign_robustness_dealer_divergence"
 
     def __post_init__(self):
