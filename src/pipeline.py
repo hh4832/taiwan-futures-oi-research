@@ -1,4 +1,7 @@
 from pathlib import Path
+import subprocess
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .config import CONFIG
@@ -54,6 +57,12 @@ def run_research(output_dir="outputs", inspect_schema=True):
         inspect_futures_schema(raw_futures)
 
     price, price_keys = load_0050_price(CONFIG.target_symbol)
+    expected_price_keys = {"open": "etl:adj_open", "close": "etl:adj_close"}
+    if price_keys != expected_price_keys:
+        raise RuntimeError(f"Adjusted-price validation failed: {price_keys}")
+    print("price_source_open=etl:adj_open")
+    print("price_source_close=etl:adj_close")
+    print("outcome_price_adjusted=True")
     returns = build_forward_returns(price, CONFIG.horizons)
 
     datasets = []
@@ -96,6 +105,23 @@ def run_research(output_dir="outputs", inspect_schema=True):
     daily.to_parquet(outdir / "daily_dataset.parquet")
     results.to_csv(outdir / "primary_results.csv", index=False, encoding="utf-8-sig")
 
+    branch = subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    run_info = {
+        "repository": "hh4832/taiwan-futures-oi-research",
+        "branch": branch,
+        "git_commit": commit,
+        "price_source_open": price_keys["open"],
+        "price_source_close": price_keys["close"],
+        "outcome_price_adjusted": True,
+        "outcome_definition": "signal t; O1=adjusted_open[t+1]; Ck=adjusted_close[t+k] on trading-date rows",
+        "run_timestamp": datetime.now(ZoneInfo("Asia/Taipei")).isoformat(),
+        "timezone": "Asia/Taipei",
+    }
+    (outdir / "run_info.txt").write_text(
+        "\n".join(f"{key}={value}" for key, value in run_info.items()) + "\n",
+        encoding="utf-8",
+    )
     print("Price keys:", price_keys)
     print("Saved:", outdir / "daily_dataset.parquet")
     print("Saved:", outdir / "primary_results.csv")

@@ -30,6 +30,7 @@ Primary percentile groups:
 Important:
 - d0 close -> d+h close is a statistical forward return, not automatically tradable.
 - next-day open based returns are included to evaluate tradability after a d0 post-close signal.
+- Outcome prices require `etl:adj_open` and `etl:adj_close`; missing adjusted fields stop the run without raw-price fallback.
 - rolling/expanding transformations must not use future observations.
 - exploratory multiple testing should use FDR correction.
 
