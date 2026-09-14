@@ -1,4 +1,4 @@
-# Taiwan Futures Institutional OI Research — v3
+# Taiwan Futures Institutional OI Research — v4
 
 Research scaffold for testing whether Taiwan futures institutional open-interest positioning predicts future 0050 returns.
 
@@ -120,3 +120,31 @@ The canonical Drive root remains folder
 `1JrDCBf__DZA5aIlp3jxUqATsuQohtpLG`. New archives use
 `YYYYMMDD_HHMMSS_v3_foreign_robustness_dealer_divergence_<commit8>` and do not
 overwrite v2 archives.
+
+## v4: Does divergence extend the predictive horizon?
+
+Version `v4_divergence_horizon_extension` is the intended final historical
+extension. It compares Foreign Net OI Change Ratio percentile with the frozen
+Foreign–Dealer divergence on exactly the same 12 parameter cells and five
+price-ratio incremental intervals:
+
+- O1→C1
+- C1→C3
+- C3→C5
+- C5→C10
+- C10→C20
+
+Foreign keeps PR0–20 / PR80–100 and divergence keeps the fixed ±0.60 extreme
+thresholds. Bearish and bullish inference each use one pre-specified 120-test
+Global-FDR universe: 2 predictors × 12 cells × 5 intervals. Decay ratios are
+within-predictor absolute effect retention relative to Day 1; a near-zero Day-1
+effect is not evaluable. Continuous regressions standardize predictors and use
+identical date samples, so raw coefficients on different predictor scales are
+not compared.
+
+The 3D accumulation review is labeled a post-hoc mechanistic observation. No
+new accumulation, rolling, percentile, Z-score, institution, composite, ML
+model, or outcome horizon is introduced. After v4 the historical specification
+is frozen for prospective validation. New archives use
+`YYYYMMDD_HHMMSS_v4_divergence_horizon_extension_<commit8>` and do not overwrite
+earlier archives.

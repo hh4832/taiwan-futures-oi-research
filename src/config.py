@@ -48,7 +48,7 @@ class ResearchConfig:
         "Z_P0_5_P1_5", "Z_P1_5_P2_5", "Z_GE_P2_5",
     )
     drive_folder_id: str = DRIVE_ROOT_FOLDER_ID
-    research_version: str = "v3_foreign_robustness_dealer_divergence"
+    research_version: str = "v4_divergence_horizon_extension"
 
     def __post_init__(self):
         if self.min_periods_by_window is None:

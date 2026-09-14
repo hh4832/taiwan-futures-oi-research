@@ -11,6 +11,13 @@ import pandas as pd
 from .config import CONFIG, ResearchConfig
 from .features import build_oi_features
 from .horizon_nonoverlap import analyze_horizon_nonoverlap
+from .horizon_extension import (
+    analyze_horizon_extension,
+    continuous_horizon_regressions,
+    overall_horizon_answer,
+    summarize_by_accumulation,
+    summarize_horizon_extension,
+)
 from .incremental_decay import analyze_incremental_decay
 from .institutional_divergence import (
     analyze_divergence_surface,
@@ -273,6 +280,84 @@ def _write_v3_summary(archive: Path, tables: dict[str, pd.DataFrame], commit: st
 - Foreign–Dealer divergence: 保留作為 prospective-validation candidate at most; it is not a validated trading signal.
 """
     (archive / "research_summary_v3.md").write_text(text, encoding="utf-8")
+    (archive / "research_summary.md").write_text(text, encoding="utf-8")
+
+
+def _write_v4_summary(archive: Path, tables: dict[str, pd.DataFrame], commit: str):
+    comparison = tables["comparison"]
+    accumulation = tables["accumulation"]
+    answer = overall_horizon_answer(comparison)
+
+    def supported_horizon(predictor: str, side: str) -> str:
+        rows = tables[side].loc[
+            tables[side]["predictor"].eq(predictor)
+            & tables[side]["global_fdr_cells"].gt(0)
+            & (
+                tables[side]["median_effect"].lt(0)
+                if side == "bearish" else tables[side]["median_effect"].gt(0)
+            )
+        ]
+        order = ["day_1", "day_2_3", "day_4_5", "day_6_10", "day_11_20"]
+        available = [interval for interval in order if interval in set(rows["interval"])]
+        return available[-1] if available else "No Global-FDR-supported interval"
+
+    day23 = comparison.loc[comparison["interval"].eq("day_2_3")]
+    day45 = comparison.loc[comparison["interval"].eq("day_4_5")]
+    three_day = accumulation.loc[accumulation["accumulation_window"].eq(3)]
+    three_day_plateau = int(
+        (three_day["direction_consistency_cells"].eq(three_day["rolling_cells"])).sum()
+    )
+    close = "Close historical research"
+    text = f"""# v4 Divergence horizon extension
+
+## Primary answer
+
+**Does Foreign–Dealer divergence extend the predictive horizon beyond Foreign alone? {answer}**
+
+This classification follows the frozen multi-criterion rule using within-predictor
+decay, expected-direction consistency, side-specific Global FDR counts, and the
+full 12-cell surface. It is not selected from a best parameter cell.
+
+## Horizon findings
+
+- Foreign bearish supported horizon: {supported_horizon('Foreign', 'bearish')}.
+- Divergence bearish supported horizon: {supported_horizon('Foreign-Dealer divergence', 'bearish')}.
+- Foreign bullish supported horizon: {supported_horizon('Foreign', 'bullish')}.
+- Divergence bullish supported horizon: {supported_horizon('Foreign-Dealer divergence', 'bullish')}.
+- Day 2–3 head-to-head classifications: {', '.join(day23['side'] + '=' + day23['horizon_extension_supported'])}.
+- Day 4–5 head-to-head classifications: {', '.join(day45['side'] + '=' + day45['horizon_extension_supported'])}.
+- Day 2–3 and Day 4–5 raw effects, decay ratios, consistency counts, FDR counts,
+  sample sizes, confidence intervals, and Cohen's d remain in the CSV outputs.
+- Continuous regressions use standardized predictors on identical date samples;
+  raw beta scales are not compared.
+
+## 3D accumulation
+
+The 3D accumulation has {three_day_plateau} predictor/side/interval rows with
+expected direction across all 60/120/252-day rolling cells. This is explicitly a
+**post-hoc mechanistic observation**, not a confirmatory discovery or a reason to
+change the frozen grid.
+
+## Bias and interpretation audit
+
+- Look-ahead: both institutional percentiles use strictly prior history; outcomes begin after D0.
+- Data snooping/post-selection: the 12-cell grid and both side-specific 120-test universes are fixed.
+- Multiple testing: Foreign and divergence receive the same family/global correction.
+- Overlap/clustering: HAC is used; existing multi-offset logic remains the required long-horizon check.
+- Unequal extreme samples: N, confidence intervals and Cohen's d are reported; same-sample continuous models supplement bucket comparisons.
+- Extreme-event and era dependence: v3 robustness outputs remain available; v4 is not prospective OOS.
+- Statistical evidence does not establish tradability; transaction costs and slippage are not included.
+
+## Frozen research disposition
+
+- Foreign predictive horizon: 保留 as a short-horizon benchmark.
+- Divergence predictive horizon: {'保留' if answer == 'Yes' else '修改後再測'} for prospective validation; no further historical parameter search.
+- Divergence as composite signal: 保留 as a Day-1 candidate subject to prospective validation.
+- Entire futures OI research: **{close}** and proceed to freeze specification → prospective validation.
+
+Commit: {commit}
+"""
+    (archive / "research_summary_v4.md").write_text(text, encoding="utf-8")
     (archive / "research_summary.md").write_text(text, encoding="utf-8")
 
 
@@ -587,14 +672,21 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         foreign, config
     )
 
+    incremental_returns = build_incremental_returns(price)
     divergence_frame = build_divergence_features(
         merged_parts["外資及陸資"], merged_parts["自營商"], config
-    ).join(returns[["o1_c1"]], how="left")
+    ).join(returns[["o1_c1"]], how="left").join(incremental_returns, how="left")
     divergence_surface, divergence_primary, divergence_monotonic = (
         analyze_divergence_surface(divergence_frame, config)
     )
     divergence_regression = divergence_regressions(divergence_frame, config)
     divergence_robust = divergence_robustness(divergence_frame, config)
+    horizon_extension = analyze_horizon_extension(divergence_frame, config)
+    horizon_regression = continuous_horizon_regressions(divergence_frame, config)
+    bearish_horizon, bullish_horizon, horizon_comparison = (
+        summarize_horizon_extension(horizon_extension)
+    )
+    horizon_by_accumulation = summarize_by_accumulation(horizon_extension)
     foreign_trust = build_oi_features(
         _build_foreign_trust_oi(oi_by_institution),
         accumulation_windows=config.accumulation_windows,
@@ -655,6 +747,18 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "foreign_dealer_divergence_event_entry.csv": divergence_robust["event_entry"],
         "institutional_composite_comparison.csv": composite_comparison,
         "foreign_dealer_divergence_monotonicity.csv": divergence_monotonic,
+        "divergence_incremental_decay_results.csv": horizon_extension.loc[
+            horizon_extension["predictor"].eq("Foreign-Dealer divergence")
+        ],
+        "divergence_incremental_decay_summary.csv": pd.concat([
+            bearish_horizon.loc[bearish_horizon["predictor"].eq("Foreign-Dealer divergence")],
+            bullish_horizon.loc[bullish_horizon["predictor"].eq("Foreign-Dealer divergence")],
+        ], ignore_index=True),
+        "foreign_vs_divergence_horizon_comparison.csv": horizon_comparison,
+        "bearish_horizon_extension_summary.csv": bearish_horizon,
+        "bullish_horizon_extension_summary.csv": bullish_horizon,
+        "foreign_divergence_continuous_horizon_regression.csv": horizon_regression,
+        "horizon_extension_by_accumulation.csv": horizon_by_accumulation,
     }
     for filename, frame in outputs.items():
         frame.to_csv(archive / filename, index=False, encoding="utf-8-sig")
@@ -696,6 +800,14 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "phase_a_incremental_decay": True,
         "phase_a_horizon_nonoverlap": True,
         "phase_b_foreign_dealer_divergence": True,
+        "research_question": "does_foreign_dealer_divergence_extend_predictive_horizon",
+        "baseline_version": "v3_foreign_robustness_dealer_divergence",
+        "foreign_signal": "net_oi_change_ratio_percentile",
+        "divergence_signal": "foreign_percentile_minus_dealer_percentile",
+        "divergence_threshold": 0.6,
+        "incremental_intervals": "day1,day2_3,day4_5,day6_10,day11_20",
+        "historical_parameter_expansion": False,
+        "intended_final_historical_extension": True,
         "zscore_new_analysis": False,
         "accumulation_windows": ",".join(map(str, config.accumulation_windows)),
         "rolling_windows": ",".join(map(str, config.rolling_windows)),
@@ -723,6 +835,12 @@ def run_research(output_root="outputs", inspect_schema=True, config: ResearchCon
         "monotonic": divergence_monotonic,
         "regressions": divergence_regression,
         "comparison": composite_comparison,
+    }, commit)
+    _write_v4_summary(archive, {
+        "bearish": bearish_horizon,
+        "bullish": bullish_horizon,
+        "comparison": horizon_comparison,
+        "accumulation": horizon_by_accumulation,
     }, commit)
     print(f"Saved archive: {archive}")
     return merged, results, archive
