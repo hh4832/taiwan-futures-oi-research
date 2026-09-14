@@ -222,8 +222,14 @@ def upload_archive_to_drive(
     print(f"[Drive] {'Created' if created else 'Resuming'} folder: {root_id}")
 
     folder_ids = {Path(): root_id}
+    relative_dirs = set()
+    for path in files:
+        parent = path.relative_to(archive).parent
+        while parent != Path("."):
+            relative_dirs.add(parent)
+            parent = parent.parent
     directories = sorted(
-        {path.relative_to(archive).parent for path in files if path.parent != archive},
+        relative_dirs,
         key=lambda item: (len(item.parts), item.as_posix()),
     )
     for relative_dir in directories:

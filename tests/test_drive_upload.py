@@ -20,8 +20,11 @@ class FilesApi:
     def __init__(self, run_name=None):
         self.items = {}
         self.created_folders = 0
+        self.folder_paths = {}
+        self.created_directory_paths = []
         if run_name:
             self.add_folder("run-id", run_name, "parent")
+            self.folder_paths["run-id"] = Path()
 
     def add_folder(self, file_id, name, parent):
         self.items[file_id] = {
@@ -59,7 +62,11 @@ class FilesApi:
         assert media_body is None
         self.created_folders += 1
         file_id = f"folder-{self.created_folders}"
-        self.add_folder(file_id, body["name"], body["parents"][0])
+        parent_id = body["parents"][0]
+        relative_path = self.folder_paths.get(parent_id, Path()) / body["name"]
+        self.created_directory_paths.append(relative_path.as_posix())
+        self.folder_paths[file_id] = relative_path
+        self.add_folder(file_id, body["name"], parent_id)
         return Request(self.items[file_id])
 
 
@@ -181,6 +188,35 @@ def test_existing_identical_file_is_skipped(tmp_path, monkeypatch):
     )
     assert "primary_results.csv" in result["skipped_files"]
     assert "primary_results.csv" not in uploaded
+
+
+def test_nested_directories_create_parent_before_child(tmp_path, monkeypatch):
+    archive = archive_at(tmp_path)
+    (archive / "figures" / "dealer").mkdir(parents=True)
+    (archive / "figures" / "foreign").mkdir(parents=True)
+    (archive / "figures" / "dealer" / "a.png").write_bytes(b"dealer")
+    (archive / "figures" / "foreign" / "b.png").write_bytes(b"foreign")
+    api = FilesApi(run_name=archive.name)
+    monkeypatch.setattr(drive_upload, "_upload_resumable_file", mock_upload(api))
+
+    drive_upload.upload_archive_to_drive(archive, "parent", service=Service(api))
+
+    assert api.created_directory_paths == [
+        "figures", "figures/dealer", "figures/foreign",
+    ]
+
+
+def test_deep_nested_directories_create_all_ancestors(tmp_path, monkeypatch):
+    archive = archive_at(tmp_path)
+    deep = archive / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "test.txt").write_text("deep", encoding="utf-8")
+    api = FilesApi(run_name=archive.name)
+    monkeypatch.setattr(drive_upload, "_upload_resumable_file", mock_upload(api))
+
+    drive_upload.upload_archive_to_drive(archive, "parent", service=Service(api))
+
+    assert api.created_directory_paths == ["a", "a/b", "a/b/c"]
 
 
 def test_upload_returns_structured_result(tmp_path, monkeypatch):
