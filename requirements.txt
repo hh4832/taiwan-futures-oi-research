@@ -6,4 +6,6 @@ matplotlib>=3.8
 pyarrow>=16
 finlab>=2.0.18
 google-api-python-client>=2.140
+google-auth-httplib2>=0.2
+httplib2>=0.22
 pytest>=8.2
